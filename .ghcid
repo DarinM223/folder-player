@@ -1,0 +1,1 @@
+--restart=folder-player.cabal -c cabal new-repl

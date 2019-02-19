@@ -21,6 +21,7 @@ executable folder-player
   -- other-extensions:
   build-depends:       base >=4.10 && <5
                      , directory
+                     , filepath
                      , gi-gtk
                      , gi-gtk-declarative
                      , gi-gtk-declarative-app-simple

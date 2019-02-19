@@ -10,13 +10,44 @@ import GI.Gtk hiding ((:=), on, main, Widget)
 import GI.Gtk.Declarative
 import GI.Gtk.Declarative.App.Simple
 import System.Directory (listDirectory)
+import System.FilePath (takeExtension)
 import qualified Data.Text as Text
 
-data State = State
-data Event = FolderEvent (Either String [FilePath]) | Closed
+data PlayState = Playing | Paused
+
+data PlaylistState = PlaylistState
+  { playlistFiles     :: [FilePath]
+  , playlistVolume    :: Double
+  , playlistProgress  :: Double
+  , playlistPlayState :: PlayState
+  }
+
+defaultPlaylistState :: [FilePath] -> PlaylistState
+defaultPlaylistState files = PlaylistState
+  { playlistFiles     = files
+  , playlistVolume    = 0.0
+  , playlistProgress  = 0.0 -- TODO(DarinM223): check that beginning is at 0.0.
+  , playlistPlayState = Paused
+  }
+
+data State = ChooseFolder | Playlist PlaylistState
+
+data PlayEvent = TogglePlay
+               | NextButtonClicked
+               | PrevButtonClicked
+               | SetVolume Double
+               | UpdateProgress Double
+               | BackToChooseFolder
+
+data Event = FolderEvent (Either String [FilePath])
+           | PlayEvent PlayEvent
+           | Closed
 
 data FolderNotFound = FolderNotFound deriving Show
 instance Exception FolderNotFound
+
+soundFileExts :: [String]
+soundFileExts = [".wav", ".mp3"]
 
 chooseFolderWidget :: Widget (Either String [FilePath])
 chooseFolderWidget = container Box
@@ -38,8 +69,24 @@ chooseFolderWidget = container Box
    where
     err = pure $ Left FolderNotFound
     toEvent (Left e)      = Left $ displayException e
-    toEvent (Right files) = Right files
-    -- TODO(DarinM223): only select sound files
+    toEvent (Right files) =
+      Right $ filter ((`elem` soundFileExts) . takeExtension) files
+
+playWidget :: PlaylistState -> Widget PlayEvent
+playWidget s = container Box
+  [#orientation := OrientationVertical]
+  [ BoxChild defaultBoxChildProperties $ widget Scale []
+  , BoxChild defaultBoxChildProperties $ container Box
+    [#orientation := OrientationHorizontal]
+    [ BoxChild playButtonProps $ widget Button []
+    , BoxChild playButtonProps $ widget Button []
+    , BoxChild playButtonProps $ widget Button []
+    ]
+  , BoxChild defaultBoxChildProperties $ widget VolumeButton []
+  ]
+ where
+  playButtonProps = defaultBoxChildProperties
+    { expand = True, fill = True, padding = 10 }
 
 view' :: State -> AppView Window Event
 view' s = bin Window
@@ -49,19 +96,21 @@ view' s = bin Window
   , #heightRequest := 70
   ] $
   case s of
-    State -> FolderEvent <$> chooseFolderWidget
+    ChooseFolder  -> FolderEvent <$> chooseFolderWidget
+    Playlist state -> PlayEvent <$> playWidget state
 
 update' :: State -> Event -> Transition State Event
-update' State (FolderEvent (Right ps)) =
-  Transition State (Nothing <$ print ps)
-update' State (FolderEvent (Left e)) =
-  Transition State (Nothing <$ putStrLn e)
+update' ChooseFolder (FolderEvent (Right ps)) =
+  Transition (Playlist $ defaultPlaylistState ps) (Nothing <$ print ps)
+update' ChooseFolder (FolderEvent (Left e)) =
+  Transition ChooseFolder (Nothing <$ putStrLn e)
 update' _ Closed = Exit
+update' _ _ = Transition ChooseFolder (pure Nothing)
 
 main :: IO ()
 main = void $ run App
   { view         = view'
   , update       = update'
   , inputs       = []
-  , initialState = State
+  , initialState = ChooseFolder
   }

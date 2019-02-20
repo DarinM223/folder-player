@@ -20,11 +20,14 @@ executable folder-player
   -- other-modules:
   -- other-extensions:
   build-depends:       base >=4.10 && <5
+                     , bifunctor
                      , directory
                      , filepath
                      , gi-gtk
                      , gi-gtk-declarative
                      , gi-gtk-declarative-app-simple
+                     , sdl2
+                     , sdl2-mixer
                      , text
   -- hs-source-dirs:
   ghc-options: -W

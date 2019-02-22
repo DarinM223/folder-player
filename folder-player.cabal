@@ -26,9 +26,11 @@ executable folder-player
                      , gi-gtk
                      , gi-gtk-declarative
                      , gi-gtk-declarative-app-simple
+                     , monad-loops
                      , sdl2
                      , sdl2-mixer
                      , text
+                     , vector
   -- hs-source-dirs:
   ghc-options: -W
                -Wcompat

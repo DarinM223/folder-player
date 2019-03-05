@@ -46,7 +46,12 @@ playMusic interrupt file = do
   forkIO $ do
     whileM_ Mixer.playingMusic $ threadDelay 50
     atomically $ putTMVar finished NextButtonClicked
-  action <- atomically $ takeTMVar interrupt <|> takeTMVar finished
+  action <- atomically $ do
+    action <- takeTMVar interrupt <|> takeTMVar finished
+    -- Make sure interrupt is not empty, even if action was taken from
+    -- finished.
+    tryPutTMVar interrupt action
+    return action
   Mixer.free music
   return $ Just action
 
@@ -157,9 +162,11 @@ playWidget s = container Box
 putInterrupt :: PlaylistState -> IO (Maybe PlayEvent)
 putInterrupt s = do
   i <- Interrupt <$> newEmptyTMVarIO
-  mapM_ (put i) (playlistInterrupt s)
-  return Nothing
- where put i var = atomically $ putTMVar var $ SetInterrupt i
+  success <- mapM (put i) (playlistInterrupt s)
+  if success == Just True
+    then return Nothing
+    else return $ Just $ SetInterrupt i
+ where put i var = atomically $ tryPutTMVar var $ SetInterrupt i
 
 updatePlay :: PlaylistState -> PlayEvent -> Transition PlaylistState PlayEvent
 updatePlay s TogglePlay = case playlistPlayState s of
@@ -210,12 +217,14 @@ update' _ Closed = Exit
 update' _ _ = Transition ChooseFolder (pure Nothing)
 
 main :: IO ()
-main = initAudio $ const $ void $ run App
-  { view         = view'
-  , update       = update'
-  , inputs       = []
-  , initialState = ChooseFolder
-  }
+main = initAudio $ const $ void $ do
+  Mixer.setMusicVolume 0
+  run App
+    { view         = view'
+    , update       = update'
+    , inputs       = []
+    , initialState = ChooseFolder
+    }
  where
   initAudio = bracket
     (Mixer.openAudio Mixer.defaultAudio 4096)

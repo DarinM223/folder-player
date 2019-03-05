@@ -5,6 +5,10 @@
 
 module Main where
 
+import Control.Applicative ((<|>))
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.STM (atomically)
+import Control.Concurrent.STM.TMVar
 import Control.Exception
 import Control.Monad (void)
 import Control.Monad.Loops (whileM_)
@@ -16,7 +20,6 @@ import System.Directory (listDirectory)
 import System.FilePath (takeExtension, (</>))
 import qualified Data.Text as Text
 import qualified Data.Vector as V
-import qualified SDL
 import qualified SDL.Mixer as Mixer
 
 data PlayState = Playing | Paused
@@ -35,17 +38,22 @@ mkMusicFile path = return MusicFile
   , musicFileInfo = MusicInfo
   }
 
-playMusic :: MusicFile -> IO (Maybe PlayEvent)
-playMusic file = do
+playMusic :: TMVar PlayEvent -> MusicFile -> IO (Maybe PlayEvent)
+playMusic interrupt file = do
   music <- Mixer.load $ musicFilePath file
   Mixer.playMusic 1 music
-  whileM_ Mixer.playingMusic $ SDL.delay 50
+  finished <- newEmptyTMVarIO
+  forkIO $ do
+    whileM_ Mixer.playingMusic $ threadDelay 50
+    atomically $ putTMVar finished NextButtonClicked
+  action <- atomically $ takeTMVar interrupt <|> takeTMVar finished
   Mixer.free music
-  return $ Just NextButtonClicked
+  return $ Just action
 
 data PlaylistState = PlaylistState
   { playlistFiles     :: V.Vector MusicFile
   , playlistCurrIndex :: Int
+  , playlistInterrupt :: Maybe (TMVar PlayEvent)
   , playlistVolume    :: Int
   , playlistPlayState :: PlayState
   }
@@ -54,6 +62,7 @@ defaultPlaylistState :: [MusicFile] -> PlaylistState
 defaultPlaylistState files = PlaylistState
   { playlistFiles     = V.fromList files
   , playlistCurrIndex = 0
+  , playlistInterrupt = Nothing
   , playlistVolume    = 0
   , playlistPlayState = Paused
   }
@@ -64,9 +73,14 @@ adjustIndex s amount =
 
 data State = ChooseFolder | Playlist PlaylistState
 
+newtype Interrupt event = Interrupt (TMVar event) deriving Eq
+instance Show (Interrupt event) where
+  show _ = ""
+
 data PlayEvent = TogglePlay
                | NextButtonClicked
                | PrevButtonClicked
+               | SetInterrupt (Interrupt PlayEvent)
                | SetVolume Int
                | BackToChooseFolder
                deriving (Show, Eq)
@@ -140,6 +154,13 @@ playWidget s = container Box
   onVolumeChanged =
     SetVolume . floor . (* fromIntegral mixerMaxVolume)
 
+putInterrupt :: PlaylistState -> IO (Maybe PlayEvent)
+putInterrupt s = do
+  i <- Interrupt <$> newEmptyTMVarIO
+  mapM_ (put i) (playlistInterrupt s)
+  return Nothing
+ where put i var = atomically $ putTMVar var $ SetInterrupt i
+
 updatePlay :: PlaylistState -> PlayEvent -> Transition PlaylistState PlayEvent
 updatePlay s TogglePlay = case playlistPlayState s of
   Playing -> Transition
@@ -147,17 +168,20 @@ updatePlay s TogglePlay = case playlistPlayState s of
     (Nothing <$ Mixer.pauseMusic)
   Paused -> Transition (s { playlistPlayState = Playing }) $ do
     paused <- Mixer.pausedMusic
-    let musicFile = playlistFiles s V.! playlistCurrIndex s
+    i <- Interrupt <$> newEmptyTMVarIO
     if | paused                         -> Nothing <$ Mixer.resumeMusic
-       | not (V.null (playlistFiles s)) -> playMusic musicFile
+       | not (V.null (playlistFiles s)) -> return $ Just $ SetInterrupt i
        | otherwise                      -> return Nothing
+updatePlay s (SetInterrupt (Interrupt var)) = Transition
+  s { playlistInterrupt = Just var }
+  (playMusic var $ playlistFiles s V.! playlistCurrIndex s)
 updatePlay s PrevButtonClicked = Transition
   s { playlistCurrIndex = prevIndex }
-  (playMusic $ playlistFiles s V.! prevIndex)
+  (putInterrupt s)
  where prevIndex = adjustIndex s (-1)
 updatePlay s NextButtonClicked = Transition
   s { playlistCurrIndex = nextIndex }
-  (playMusic $ playlistFiles s V.! nextIndex)
+  (putInterrupt s)
  where nextIndex = adjustIndex s 1
 updatePlay s (SetVolume volume) = Transition
   s { playlistVolume = volume }

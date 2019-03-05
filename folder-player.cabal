@@ -29,6 +29,7 @@ executable folder-player
                      , monad-loops
                      , sdl2
                      , sdl2-mixer
+                     , stm
                      , text
                      , vector
   -- hs-source-dirs:

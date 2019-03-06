@@ -3,6 +3,8 @@
 {-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Main where
 
@@ -13,31 +15,41 @@ import Control.Concurrent.STM.TMVar
 import Control.Exception
 import Control.Monad (void)
 import Control.Monad.Loops (whileM_)
-import Data.Bifunctor (first)
+import Data.List (elemIndex)
+import Data.Maybe (fromMaybe)
 import GI.Gtk hiding ((:=), on, main, Widget)
 import GI.Gtk.Declarative
 import GI.Gtk.Declarative.App.Simple
 import System.Directory (listDirectory)
-import System.FilePath (takeExtension, takeFileName, (</>))
+import System.FilePath (takeDirectory, takeExtension, takeFileName, (</>))
 import qualified Data.Text as Text
 import qualified Data.Vector as V
 import qualified SDL.Mixer as Mixer
+import qualified Sound.HTagLib as Tag
 
 data PlayState = Playing | Paused
 
-data MusicInfo = MusicInfo deriving (Show, Eq)
+data MusicInfo = MusicInfo
+  { infoTitle  :: Tag.Title
+  , infoArtist :: Tag.Artist
+  , infoAlbum  :: Tag.Album
+  , infoYear   :: Maybe Tag.Year
+  } deriving (Show, Eq)
+
+musicInfoGetter :: Tag.TagGetter MusicInfo
+musicInfoGetter = MusicInfo
+  <$> Tag.titleGetter
+  <*> Tag.artistGetter
+  <*> Tag.albumGetter
+  <*> Tag.yearGetter
 
 data MusicFile = MusicFile
   { musicFilePath :: FilePath
   , musicFileInfo :: MusicInfo
   } deriving (Show, Eq)
 
--- TODO(DarinM223): load file info from path
 mkMusicFile :: FilePath -> IO MusicFile
-mkMusicFile path = return MusicFile
-  { musicFilePath = path
-  , musicFileInfo = MusicInfo
-  }
+mkMusicFile path = MusicFile <$> pure path <*> Tag.getTags path musicInfoGetter
 
 playMusic :: TMVar PlayEvent -> MusicFile -> IO (Maybe PlayEvent)
 playMusic interrupt file = do
@@ -64,10 +76,10 @@ data PlaylistState = PlaylistState
   , playlistPlayState :: PlayState
   }
 
-defaultPlaylistState :: [MusicFile] -> PlaylistState
-defaultPlaylistState files = PlaylistState
+defaultPlaylistState :: Int -> [MusicFile] -> PlaylistState
+defaultPlaylistState i files = PlaylistState
   { playlistFiles     = V.fromList files
-  , playlistCurrIndex = 0
+  , playlistCurrIndex = i
   , playlistInterrupt = Nothing
   , playlistVolume    = 0
   , playlistPlayState = Paused
@@ -91,7 +103,7 @@ data PlayEvent = TogglePlay
                | BackToChooseFolder
                deriving (Show, Eq)
 
-data Event = FolderEvent (Either String [MusicFile])
+data Event = FolderEvent (Either String (Int, [MusicFile]))
            | PlayEvent PlayEvent
            | Closed
            deriving (Show, Eq)
@@ -110,7 +122,7 @@ mapTransition _ _ Exit = Exit
 mapTransition mapS mapE (Transition s me) =
   Transition (mapS s) (fmap mapE <$> me)
 
-chooseFolderWidget :: Widget (Either String [MusicFile])
+chooseFolderWidget :: Widget (Either String (Int, [MusicFile]))
 chooseFolderWidget = container Box
   [#orientation := OrientationHorizontal]
   [ BoxChild defaultBoxChildProperties $
@@ -119,20 +131,20 @@ chooseFolderWidget = container Box
     { expand = True, fill = True, padding = 10 } $
     widget FileChooserButton
     [ #title := "Choose folder"
-    , #action := FileChooserActionSelectFolder
     , onM #selectionChanged onSelectionChanged
     ]
   ]
  where
-  onSelectionChanged chooser = do
-    dir <- fileChooserGetFilename chooser
-    paths <- toEvent dir <$> maybe (pure err) (try . listDirectory) dir
-    either (pure . Left) (fmap Right . mapM mkMusicFile) paths
+  onSelectionChanged chooser = fileChooserGetFilename chooser >>= \case
+    Just file -> do
+      let dir = takeDirectory file
+      paths <- keepSoundFiles dir <$> try @IOError (listDirectory dir)
+      let i = either (const 0) (fromMaybe 0 . elemIndex file) paths
+      either (pure . Left) (fmap (Right . (i, )) . mapM mkMusicFile) paths
+    Nothing -> return $ Left "No file selected"
    where
-    err = Left FolderNotFound
-    toEvent Nothing _  = first displayException err
-    toEvent _ (Left e) = Left $ displayException e
-    toEvent (Just dir) (Right files)
+    keepSoundFiles _ (Left e) = Left $ displayException e
+    keepSoundFiles dir (Right files)
       = Right
       . fmap (dir </>)
       . filter ((`elem` soundFileExts) . takeExtension)
@@ -219,8 +231,8 @@ view' s = bin Window
     _ -> "Folder Music Player"
 
 update' :: State -> Event -> Transition State Event
-update' ChooseFolder (FolderEvent (Right ps)) =
-  Transition (Playlist $ defaultPlaylistState ps) (pure Nothing)
+update' ChooseFolder (FolderEvent (Right (i, ps))) =
+  Transition (Playlist $ defaultPlaylistState i ps) (pure Nothing)
 update' ChooseFolder (FolderEvent (Left e)) =
   Transition ChooseFolder (Nothing <$ putStrLn e)
 update' (Playlist s) (PlayEvent p) =

@@ -38,6 +38,14 @@ data MusicInfo = MusicInfo
   , infoYear   :: Maybe Tag.Year
   } deriving (Show, Eq)
 
+albumText :: MusicInfo -> Text.Text
+albumText i
+  =  Tag.unAlbum (infoAlbum i)
+  <> " - "
+  <> Tag.unArtist (infoArtist i)
+  <> maybe "" (parens . Text.pack . show . Tag.unYear) (infoYear i)
+ where parens s = " (" <> s <> ")"
+
 musicInfoGetter :: Tag.TagGetter MusicInfo
 musicInfoGetter = MusicInfo
   <$> Tag.titleGetter
@@ -165,7 +173,12 @@ chooseFolderWidget err = container Box
 playWidget :: PlaylistState -> Widget PlayEvent
 playWidget s = container Box
   [#orientation := OrientationVertical]
-  [ BoxChild groupProps $ container Box
+  [ BoxChild defaultBoxChildProperties { padding = 10 } $
+    widget HeaderBar
+    [ #title := Tag.unTitle (infoTitle $ musicFileInfo file)
+    , #subtitle := albumText (musicFileInfo file)
+    ]
+  , BoxChild groupProps $ container Box
     [#orientation := OrientationHorizontal]
     [ BoxChild playButtonProps $ widget Button
       [#label := "<<", on #clicked PrevButtonClicked]
@@ -178,6 +191,7 @@ playWidget s = container Box
     [on #valueChanged onVolumeChanged]
   ]
  where
+  file = playlistFiles s V.! playlistCurrIndex s
   groupProps = defaultBoxChildProperties { expand = True, fill = True }
   playButtonProps = defaultBoxChildProperties
     { expand = True, fill = True, padding = 10 }
@@ -230,7 +244,7 @@ view' s = bin Window
   [ #title := title
   , on #deleteEvent (const (True, Closed))
   , #widthRequest := 400
-  , #heightRequest := 70
+  , #heightRequest := 100
   ] $
   case s of
     ChooseFolder e -> FolderEvent <$> chooseFolderWidget e

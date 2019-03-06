@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedLists #-}
@@ -17,7 +18,7 @@ import GI.Gtk hiding ((:=), on, main, Widget)
 import GI.Gtk.Declarative
 import GI.Gtk.Declarative.App.Simple
 import System.Directory (listDirectory)
-import System.FilePath (takeExtension, (</>))
+import System.FilePath (takeExtension, takeFileName, (</>))
 import qualified Data.Text as Text
 import qualified Data.Vector as V
 import qualified SDL.Mixer as Mixer
@@ -145,7 +146,7 @@ playWidget s = container Box
     [ BoxChild playButtonProps $ widget Button
       [#label := "<<", on #clicked PrevButtonClicked]
     , BoxChild playButtonProps $ widget Button
-      [#label := ">", on #clicked TogglePlay]
+      [#label := "|>", onM #clicked onPlayClicked]
     , BoxChild playButtonProps $ widget Button
       [#label := ">>", on #clicked NextButtonClicked]
     ]
@@ -158,6 +159,12 @@ playWidget s = container Box
     { expand = True, fill = True, padding = 10 }
   onVolumeChanged =
     SetVolume . floor . (* fromIntegral mixerMaxVolume)
+  onPlayClicked button = do
+    buttonGetLabel button >>= \case
+      "|>" -> buttonSetLabel button "||"
+      "||" -> buttonSetLabel button "|>"
+      _    -> return ()
+    return TogglePlay
 
 putInterrupt :: PlaylistState -> IO (Maybe PlayEvent)
 putInterrupt s = do
@@ -183,13 +190,11 @@ updatePlay s (SetInterrupt (Interrupt var)) = Transition
   s { playlistInterrupt = Just var }
   (playMusic var $ playlistFiles s V.! playlistCurrIndex s)
 updatePlay s PrevButtonClicked = Transition
-  s { playlistCurrIndex = prevIndex }
+  s { playlistCurrIndex = adjustIndex s (-1) }
   (putInterrupt s)
- where prevIndex = adjustIndex s (-1)
 updatePlay s NextButtonClicked = Transition
-  s { playlistCurrIndex = nextIndex }
+  s { playlistCurrIndex = adjustIndex s 1 }
   (putInterrupt s)
- where nextIndex = adjustIndex s 1
 updatePlay s (SetVolume volume) = Transition
   s { playlistVolume = volume }
   (Nothing <$ Mixer.setMusicVolume volume)
@@ -197,7 +202,7 @@ updatePlay s p = Transition s (Nothing <$ print p)
 
 view' :: State -> AppView Window Event
 view' s = bin Window
-  [ #title := "Folder Music Player"
+  [ #title := title
   , on #deleteEvent (const (True, Closed))
   , #widthRequest := 400
   , #heightRequest := 70
@@ -205,6 +210,13 @@ view' s = bin Window
   case s of
     ChooseFolder   -> FolderEvent <$> chooseFolderWidget
     Playlist state -> PlayEvent <$> playWidget state
+ where
+  currPlayingFile ps = Text.pack $ takeFileName $ musicFilePath file
+   where file = playlistFiles ps V.! playlistCurrIndex ps
+  title = case s of
+    Playlist ps@PlaylistState { playlistInterrupt = Just _ } ->
+      "Playing " <> currPlayingFile ps
+    _ -> "Folder Music Player"
 
 update' :: State -> Event -> Transition State Event
 update' ChooseFolder (FolderEvent (Right ps)) =
@@ -219,12 +231,11 @@ update' _ _ = Transition ChooseFolder (pure Nothing)
 main :: IO ()
 main = initAudio $ const $ void $ do
   Mixer.setMusicVolume 0
-  run App
-    { view         = view'
-    , update       = update'
-    , inputs       = []
-    , initialState = ChooseFolder
-    }
+  run App { view         = view'
+          , update       = update'
+          , inputs       = []
+          , initialState = ChooseFolder
+          }
  where
   initAudio = bracket
     (Mixer.openAudio Mixer.defaultAudio 4096)

@@ -5,7 +5,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
-
 module Main where
 
 import Control.Applicative ((<|>))
@@ -15,8 +14,9 @@ import Control.Concurrent.STM.TMVar
 import Control.Exception
 import Control.Monad (void)
 import Control.Monad.Loops (whileM_)
+import Data.ByteString (ByteString)
 import Data.List (elemIndex)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromJust, fromMaybe, isJust)
 import GI.Gtk hiding ((:=), on, main, Widget)
 import GI.Gtk.Declarative
 import GI.Gtk.Declarative.App.Simple
@@ -24,6 +24,8 @@ import System.Directory (listDirectory)
 import System.FilePath (takeDirectory, takeExtension, takeFileName, (</>))
 import qualified Data.Text as Text
 import qualified Data.Vector as V
+import qualified GI.Gdk as Gdk
+import qualified GI.Gtk as Gtk
 import qualified SDL.Mixer as Mixer
 import qualified Sound.HTagLib as Tag
 
@@ -89,7 +91,7 @@ adjustIndex :: PlaylistState -> Int -> Int
 adjustIndex s amount =
   (playlistCurrIndex s + amount) `mod` V.length (playlistFiles s)
 
-data State = ChooseFolder | Playlist PlaylistState
+data State = ChooseFolder (Maybe Text.Text) | Playlist PlaylistState
 
 newtype Interrupt event = Interrupt (TMVar event) deriving Eq
 instance Show (Interrupt event) where
@@ -98,12 +100,13 @@ instance Show (Interrupt event) where
 data PlayEvent = TogglePlay
                | NextButtonClicked
                | PrevButtonClicked
+               | StopPlaying
                | SetInterrupt (Interrupt PlayEvent)
                | SetVolume Int
                | BackToChooseFolder
                deriving (Show, Eq)
 
-data Event = FolderEvent (Either String (Int, [MusicFile]))
+data Event = FolderEvent (Either Text.Text (Int, [MusicFile]))
            | PlayEvent PlayEvent
            | Closed
            deriving (Show, Eq)
@@ -122,28 +125,37 @@ mapTransition _ _ Exit = Exit
 mapTransition mapS mapE (Transition s me) =
   Transition (mapS s) (fmap mapE <$> me)
 
-chooseFolderWidget :: Widget (Either String (Int, [MusicFile]))
-chooseFolderWidget = container Box
-  [#orientation := OrientationHorizontal]
-  [ BoxChild defaultBoxChildProperties $
-    widget Label [#label := "Choose folder:"]
-  , BoxChild defaultBoxChildProperties
-    { expand = True, fill = True, padding = 10 } $
-    widget FileChooserButton
-    [ #title := "Choose folder"
-    , onM #selectionChanged onSelectionChanged
+chooseFolderWidget :: Maybe Text.Text
+                   -> Widget (Either Text.Text (Int, [MusicFile]))
+chooseFolderWidget err = container Box
+  [#orientation := OrientationVertical]
+  [ BoxChild defaultBoxChildProperties $ widget Label
+    [ classes ["error-button"]
+    , #label := fromMaybe "" err
+    , #visible := isJust err
+    ]
+  , BoxChild defaultBoxChildProperties $ container Box
+    [#orientation := OrientationHorizontal]
+    [ BoxChild defaultBoxChildProperties $
+      widget Label [#label := "Choose first music file to play in folder:"]
+    , BoxChild defaultBoxChildProperties
+      { expand = True, fill = True, padding = 10 } $
+      widget FileChooserButton
+      [ #title := "Choose first music file in folder"
+      , onM #selectionChanged onSelectionChanged
+      ]
     ]
   ]
  where
   onSelectionChanged chooser = fileChooserGetFilename chooser >>= \case
-    Just file -> do
+    Just file | takeExtension file `elem` soundFileExts-> do
       let dir = takeDirectory file
       paths <- keepSoundFiles dir <$> try @IOError (listDirectory dir)
       let i = either (const 0) (fromMaybe 0 . elemIndex file) paths
       either (pure . Left) (fmap (Right . (i, )) . mapM mkMusicFile) paths
-    Nothing -> return $ Left "No file selected"
+    _ -> return $ Left "No music file selected"
    where
-    keepSoundFiles _ (Left e) = Left $ displayException e
+    keepSoundFiles _ (Left e) = Left $ Text.pack $ displayException e
     keepSoundFiles dir (Right files)
       = Right
       . fmap (dir </>)
@@ -210,6 +222,7 @@ updatePlay s NextButtonClicked = Transition
 updatePlay s (SetVolume volume) = Transition
   s { playlistVolume = volume }
   (Nothing <$ Mixer.setMusicVolume volume)
+updatePlay s StopPlaying = Transition s (pure Nothing)
 updatePlay s p = Transition s (Nothing <$ print p)
 
 view' :: State -> AppView Window Event
@@ -220,7 +233,7 @@ view' s = bin Window
   , #heightRequest := 70
   ] $
   case s of
-    ChooseFolder   -> FolderEvent <$> chooseFolderWidget
+    ChooseFolder e -> FolderEvent <$> chooseFolderWidget e
     Playlist state -> PlayEvent <$> playWidget state
  where
   currPlayingFile ps = Text.pack $ takeFileName $ musicFilePath file
@@ -231,24 +244,45 @@ view' s = bin Window
     _ -> "Folder Music Player"
 
 update' :: State -> Event -> Transition State Event
-update' ChooseFolder (FolderEvent (Right (i, ps))) =
+update' (ChooseFolder _) (FolderEvent (Right (i, ps))) =
   Transition (Playlist $ defaultPlaylistState i ps) (pure Nothing)
-update' ChooseFolder (FolderEvent (Left e)) =
-  Transition ChooseFolder (Nothing <$ putStrLn e)
+update' (ChooseFolder _) (FolderEvent (Left e)) =
+  Transition (ChooseFolder (Just e)) (pure Nothing)
 update' (Playlist s) (PlayEvent p) =
   mapTransition Playlist PlayEvent $ updatePlay s p
-update' _ Closed = Exit
-update' _ _ = Transition ChooseFolder (pure Nothing)
+update' s Closed = case s of
+  Playlist ps ->
+    Transition (ChooseFolder Nothing) $ do
+      mapM_ (atomically . flip tryPutTMVar StopPlaying) (playlistInterrupt ps)
+      return Nothing
+  _ -> Exit
+update' _ _ = Transition (ChooseFolder Nothing) (pure Nothing)
+
+styles :: ByteString
+styles = mconcat
+  [ ".error-button { color: red; }"
+  ]
 
 main :: IO ()
 main = initAudio $ const $ void $ do
   Mixer.setMusicVolume 0
-  run App { view         = view'
-          , update       = update'
-          , inputs       = []
-          , initialState = ChooseFolder
-          }
+  void $ Gtk.init Nothing
+  screen <- fromJust <$> Gdk.screenGetDefault
+  p <- Gtk.cssProviderNew
+  Gtk.cssProviderLoadFromData p styles
+  Gtk.styleContextAddProviderForScreen
+    screen
+    p
+    (fromIntegral Gtk.STYLE_PROVIDER_PRIORITY_USER)
+  void $ forkIO $ do
+    void $ runLoop app
+    Gtk.mainQuit
+  Gtk.main
  where
   initAudio = bracket
     (Mixer.openAudio Mixer.defaultAudio 4096)
     (const Mixer.closeAudio)
+  app = App { view         = view'
+            , update       = update'
+            , inputs       = []
+            , initialState = ChooseFolder Nothing }

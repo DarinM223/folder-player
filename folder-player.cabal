@@ -20,8 +20,10 @@ executable folder-player
   -- other-modules:
   -- other-extensions:
   build-depends:       base >=4.10 && <5
+                     , bytestring
                      , directory
                      , filepath
+                     , gi-gdk
                      , gi-gtk
                      , gi-gtk-declarative
                      , gi-gtk-declarative-app-simple

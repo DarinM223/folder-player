@@ -156,7 +156,7 @@ chooseFolderWidget err = container Box
   ]
  where
   onSelectionChanged chooser = fileChooserGetFilename chooser >>= \case
-    Just file | takeExtension file `elem` soundFileExts-> do
+    Just file | takeExtension file `elem` soundFileExts -> do
       let dir = takeDirectory file
       paths <- keepSoundFiles dir <$> try @IOError (listDirectory dir)
       let i = either (const 0) (fromMaybe 0 . elemIndex file) paths
@@ -170,6 +170,12 @@ chooseFolderWidget err = container Box
       . filter ((`elem` soundFileExts) . takeExtension)
       $ files
 
+playText :: Text.Text
+playText = "❙▶"
+
+pauseText :: Text.Text
+pauseText = "❚❚"
+
 playWidget :: PlaylistState -> Widget PlayEvent
 playWidget s = container Box
   [#orientation := OrientationVertical]
@@ -181,11 +187,11 @@ playWidget s = container Box
   , BoxChild groupProps $ container Box
     [#orientation := OrientationHorizontal]
     [ BoxChild playButtonProps $ widget Button
-      [#label := "<<", on #clicked PrevButtonClicked]
+      [classes ["group-button"], #label := "⏮", on #clicked PrevButtonClicked]
     , BoxChild playButtonProps $ widget Button
-      [#label := "|>", onM #clicked onPlayClicked]
+      [classes ["group-button"], #label := playText, onM #clicked onPlayClicked]
     , BoxChild playButtonProps $ widget Button
-      [#label := ">>", on #clicked NextButtonClicked]
+      [classes ["group-button"], #label := "⏭", on #clicked NextButtonClicked]
     ]
   , BoxChild defaultBoxChildProperties $ widget VolumeButton
     [on #valueChanged onVolumeChanged]
@@ -198,10 +204,10 @@ playWidget s = container Box
   onVolumeChanged =
     SetVolume . floor . (* fromIntegral mixerMaxVolume)
   onPlayClicked button = do
-    buttonGetLabel button >>= \case
-      "|>" -> buttonSetLabel button "||"
-      "||" -> buttonSetLabel button "|>"
-      _    -> return ()
+    buttonGetLabel button >>= \label ->
+      if | label == playText  -> buttonSetLabel button pauseText
+         | label == pauseText -> buttonSetLabel button playText
+         | otherwise          -> return ()
     return TogglePlay
 
 putInterrupt :: PlaylistState -> IO (Maybe PlayEvent)
@@ -275,6 +281,7 @@ update' _ _ = Transition (ChooseFolder Nothing) (pure Nothing)
 styles :: ByteString
 styles = mconcat
   [ ".error-button { color: red; }"
+  , ".group-button { border-radius: 50%; }"
   ]
 
 main :: IO ()

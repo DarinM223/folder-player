@@ -16,6 +16,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM (atomically)
 import Control.Concurrent.STM.TMVar
+import Control.Monad (void)
 import Control.Monad.Loops (whileM_)
 import GI.Gtk hiding ((:=), on, main, Widget)
 import GI.Gtk.Declarative
@@ -117,14 +118,14 @@ playMusic interrupt file = do
   music <- Mixer.load $ musicFilePath file
   Mixer.playMusic 1 music
   finished <- newEmptyTMVarIO
-  forkIO $ do
+  void $ forkIO $ do
     whileM_ Mixer.playingMusic $ threadDelay 50
     atomically $ putTMVar finished NextButtonClicked
   action <- atomically $ do
     action <- takeTMVar interrupt <|> takeTMVar finished
     -- Make sure interrupt is not empty, even if action was taken from
     -- finished.
-    tryPutTMVar interrupt action
+    void $ tryPutTMVar interrupt action
     return action
   Mixer.free music
   return $ Just action

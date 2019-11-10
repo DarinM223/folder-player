@@ -1,1 +1,1 @@
---restart=folder-player.cabal -c cabal new-repl
+--restart=folder-player.cabal -c cabal v2-repl

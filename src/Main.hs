@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent.Async (withAsync)
 import Control.Exception (bracket)
 import Control.Monad (void)
 import Data.ByteString (ByteString)
@@ -29,10 +29,7 @@ main = initAudio $ const $ void $ do
     screen
     p
     (fromIntegral Gtk.STYLE_PROVIDER_PRIORITY_USER)
-  void $ forkIO $ do
-    void $ runLoop app
-    Gtk.mainQuit
-  Gtk.main
+  withAsync (runLoop app >> Gtk.mainQuit) $ \_ -> Gtk.main
  where
   initAudio = bracket
     (Mixer.openAudio Mixer.defaultAudio 4096)

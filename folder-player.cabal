@@ -23,6 +23,7 @@ executable folder-player
                      , Window
   -- other-extensions:
   build-depends:       base >=4.10 && <5
+                     , async
                      , bytestring
                      , directory
                      , filepath

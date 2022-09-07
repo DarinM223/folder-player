@@ -13,9 +13,11 @@ module Playlist
   ) where
 
 import Control.Applicative ((<|>))
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM (atomically)
 import Control.Concurrent.STM.TMVar
+import Control.Exception (bracket)
 import Control.Monad (void)
 import Control.Monad.Loops (whileM_)
 import GI.Gtk hiding ((:=), on, main, Widget)
@@ -114,21 +116,20 @@ putInterrupt s = do
  where put i var = atomically $ tryPutTMVar var $ SetInterrupt i
 
 playMusic :: TMVar PlayEvent -> MusicFile -> IO (Maybe PlayEvent)
-playMusic interrupt file = do
-  music <- Mixer.load $ musicFilePath file
-  Mixer.playMusic 1 music
-  finished <- newEmptyTMVarIO
-  void $ forkIO $ do
-    whileM_ Mixer.playingMusic $ threadDelay 50
-    atomically $ putTMVar finished NextButtonClicked
-  action <- atomically $ do
-    action <- takeTMVar interrupt <|> takeTMVar finished
-    -- Make sure interrupt is not empty, even if action was taken from
-    -- finished.
-    void $ tryPutTMVar interrupt action
-    return action
-  Mixer.free music
-  return $ Just action
+playMusic interrupt file =
+  bracket (Mixer.load (musicFilePath file)) Mixer.free $ \music -> do
+    Mixer.playMusic 1 music
+    finished <- newEmptyTMVarIO
+    let clickNextWhenDone = do
+          whileM_ Mixer.playingMusic $ threadDelay 50
+          atomically $ putTMVar finished NextButtonClicked
+    withAsync clickNextWhenDone $ \_ -> do
+      fmap Just . atomically $ do
+        action <- takeTMVar interrupt <|> takeTMVar finished
+        -- Make sure interrupt is not empty, even if action was taken from
+        -- finished.
+        void $ tryPutTMVar interrupt action
+        return action
 
 updatePlaylist :: PlaylistState
                -> PlayEvent

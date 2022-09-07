@@ -1,0 +1,7 @@
+packages: .
+
+source-repository-package
+  type: git
+  location: https://github.com/avh4/gi-gtk-declarative
+  tag: 12385c04baacd2f316c77eebe5bdd5041d0231fb
+  subdir: gi-gtk-declarative

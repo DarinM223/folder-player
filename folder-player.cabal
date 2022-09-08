@@ -38,7 +38,7 @@ executable folder-player
                      , sdl2
                      -- sudo apt-get install libsdl2-mixer-dev
                      , sdl2-mixer
-                     , stm
+                     , stm >=2.5.1
                      , text
                      , vector
   hs-source-dirs:      src

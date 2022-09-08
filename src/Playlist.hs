@@ -6,13 +6,13 @@ module Playlist
   ( PlaylistState (..)
   , PlayState (..)
   , PlayEvent (..)
-  , defaultPlaylistState
+  , mkPlaylistState
   , mixerMaxVolume
   , playlistWidget
+  , interruptMusic
   , updatePlaylist
   ) where
 
-import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM (atomically)
@@ -28,37 +28,42 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import qualified SDL.Mixer as Mixer
 
-newtype Interrupt event = Interrupt (TMVar event) deriving Eq
+newtype Interrupt event = Interrupt { unInterrupt :: TMVar event }
+  deriving Eq
 instance Show (Interrupt event) where
   show _ = ""
 
 data PlayEvent = TogglePlay
+               | AutoNext
                | NextButtonClicked
                | PrevButtonClicked
                | StopPlaying
-               | SetInterrupt (Interrupt PlayEvent)
+               | PlayNewMusic
                | SetVolume Int
                | BackToChooseFolder
                deriving (Show, Eq)
 
-data PlayState = Playing | Paused
+data PlayState = Playing | Paused deriving (Show, Eq)
 
 data PlaylistState = PlaylistState
   { playlistFiles     :: V.Vector MusicFile
   , playlistCurrIndex :: Int
-  , playlistInterrupt :: Maybe (TMVar PlayEvent)
+  , playlistInterrupt :: Interrupt PlayEvent
   , playlistVolume    :: Int
   , playlistPlayState :: PlayState
-  }
+  } deriving (Show, Eq)
 
-defaultPlaylistState :: Int -> [MusicFile] -> PlaylistState
-defaultPlaylistState i files = PlaylistState
-  { playlistFiles     = V.fromList files
-  , playlistCurrIndex = i
-  , playlistInterrupt = Nothing
-  , playlistVolume    = 0
-  , playlistPlayState = Paused
-  }
+mkPlaylistState :: Int -> [MusicFile] -> IO PlaylistState
+mkPlaylistState i files = do
+  interrupt <- Interrupt <$> newEmptyTMVarIO
+  volume <- Mixer.getMusicVolume
+  return PlaylistState
+    { playlistFiles     = V.fromList files
+    , playlistCurrIndex = i
+    , playlistInterrupt = interrupt
+    , playlistVolume    = volume
+    , playlistPlayState = Paused
+    }
 
 adjustIndex :: PlaylistState -> Int -> PlaylistState
 adjustIndex s amount = s { playlistCurrIndex = i' }
@@ -91,10 +96,11 @@ playlistWidget s = container Box
       [classes ["group-button"], #label := "⏭", on #clicked NextButtonClicked]
     ]
   , BoxChild defaultBoxChildProperties $ widget VolumeButton
-    [on #valueChanged onVolumeChanged]
+    [#value := volume, on #valueChanged onVolumeChanged]
   ]
  where
   file = playlistFiles s V.! playlistCurrIndex s
+  volume = fromIntegral (playlistVolume s) / fromIntegral mixerMaxVolume
   groupProps = defaultBoxChildProperties { expand = True, fill = True }
   playButtonProps = defaultBoxChildProperties
     { expand = True, fill = True, padding = 10 }
@@ -106,30 +112,30 @@ playlistWidget s = container Box
          | otherwise          -> return ()
     return TogglePlay
 
-putInterrupt :: PlaylistState -> IO (Maybe PlayEvent)
-putInterrupt s = do
-  i <- Interrupt <$> newEmptyTMVarIO
-  success <- mapM (put i) (playlistInterrupt s)
-  if success == Just True
-    then return Nothing
-    else return $ Just $ SetInterrupt i
- where put i var = atomically $ tryPutTMVar var $ SetInterrupt i
+playMusic :: PlaylistState -> IO (Maybe PlayEvent)
+playMusic s =
+  playMusicFile (playlistInterrupt s) $ playlistFiles s V.! playlistCurrIndex s
 
-playMusic :: TMVar PlayEvent -> MusicFile -> IO (Maybe PlayEvent)
-playMusic interrupt file =
-  bracket (Mixer.load (musicFilePath file)) Mixer.free $ \music -> do
+playMusicFile :: Interrupt PlayEvent -> MusicFile -> IO (Maybe PlayEvent)
+playMusicFile (Interrupt interrupt) file =
+  withMusic file $ \music -> do
+    void $ atomically $ tryTakeTMVar interrupt
     Mixer.playMusic 1 music
-    finished <- newEmptyTMVarIO
-    let clickNextWhenDone = do
+    let autoNextWhenDone = do
           whileM_ Mixer.playingMusic $ threadDelay 50
-          atomically $ putTMVar finished NextButtonClicked
-    withAsync clickNextWhenDone $ \_ -> do
-      fmap Just . atomically $ do
-        action <- takeTMVar interrupt <|> takeTMVar finished
-        -- Make sure interrupt is not empty, even if action was taken from
-        -- finished.
-        void $ tryPutTMVar interrupt action
-        return action
+          atomically $ writeTMVar interrupt AutoNext
+    withAsync autoNextWhenDone $ \_ ->
+      Just <$> atomically (takeTMVar interrupt)
+ where
+  withMusic f =
+    bracket (Mixer.load (musicFilePath f)) ((Mixer.haltMusic >>) . Mixer.free)
+
+interruptMusic :: PlaylistState -> PlayEvent -> IO ()
+interruptMusic s event = do
+  -- Resumes the song before it gets destroyed to
+  -- prevent the mixer from getting stuck in a paused state.
+  Mixer.resumeMusic
+  atomically $ writeTMVar (unInterrupt (playlistInterrupt s)) event
 
 updatePlaylist :: PlaylistState
                -> PlayEvent
@@ -140,15 +146,16 @@ updatePlaylist s event = case event of
       s { playlistPlayState = Paused } (Nothing <$ Mixer.pauseMusic)
     Paused -> Transition (s { playlistPlayState = Playing }) $ do
       paused <- Mixer.pausedMusic
-      i <- Interrupt <$> newEmptyTMVarIO
       if | paused                         -> Nothing <$ Mixer.resumeMusic
-         | not (V.null (playlistFiles s)) -> return $ Just $ SetInterrupt i
+         | not (V.null (playlistFiles s)) -> playMusic s
          | otherwise                      -> return Nothing
-  NextButtonClicked -> Transition (adjustIndex s 1) (putInterrupt s)
-  PrevButtonClicked -> Transition (adjustIndex s (-1)) (putInterrupt s)
-  SetInterrupt (Interrupt var) -> Transition
-    s { playlistInterrupt = Just var }
-    (playMusic var $ playlistFiles s V.! playlistCurrIndex s)
+  AutoNext -> Transition (adjustIndex s 1) (pure $ Just PlayNewMusic)
+  NextButtonClicked ->
+    Transition (adjustIndex s 1) (Nothing <$ interruptMusic s PlayNewMusic)
+  PrevButtonClicked ->
+    Transition (adjustIndex s (-1)) (Nothing <$ interruptMusic s PlayNewMusic)
+  PlayNewMusic -> Transition s $
+    if playlistPlayState s == Playing then playMusic s else pure Nothing
   SetVolume volume -> Transition
     s { playlistVolume = volume } (Nothing <$ Mixer.setMusicVolume volume)
   StopPlaying -> Transition s (pure Nothing)
